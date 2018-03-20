@@ -7,13 +7,15 @@
  * This plugin requires the following Cordova/Phonegap plugins:
  * File                 cordova plugins add org.apache.cordova.file
  * File-Transfer        cordova plugins add org.apache.cordova.file-transfer
+ * Network-Information  cordova plugins add org.apache.cordova.network-information
  * Additionally, these Cordova/Phonegap plugins are invaluable for development and debugging:
  * Console              cordova plugins add org.apache.cordova.console
  *
  * It accepts the usual L.TileLayer options, plus the following (some are REQUIRED).
- * folder       REQUIRED. A folder path under which tiles are stored. The name of your app may be good, e.g. "My Trail App"
- * name         REQUIRED. A unique name for this TileLayer, for naming the tiles and then fetching them later. Keep it brief, e.g. "terrain"
- * debug        Boolean indicating whether to display verbose debugging out to console. Defaults to false. Great for using GapDebug, logcat, Xcode console, ...
+ * folder            REQUIRED. A folder path under which tiles are stored. The name of your app may be good, e.g. "My Trail App"
+ * name              REQUIRED. A unique name for this TileLayer, for naming the tiles and then fetching them later. Keep it brief, e.g. "terrain"
+ * watchconnection   Boolean indicating whether to watch the network connection and automatically switch between online/offline mode
+ * debug             Boolean indicating whether to display verbose debugging out to console. Defaults to false. Great for using GapDebug, logcat, Xcode console, ...
  *
  * Accepts an optional success_callback, which will be called when the time-intensive filesystem activities are complete.
  */
@@ -29,6 +31,7 @@ L.TileLayer.Cordova = L.TileLayer.extend({
             folder: null,
             name: null,
             autocache: false,
+            watchconnection: true,
             debug: false
         }, options);
         if (! options.folder) throw "L.TileLayer.Cordova: missing required option: folder";
@@ -80,9 +83,49 @@ L.TileLayer.Cordova = L.TileLayer.extend({
                 throw "L.TileLayer.Cordova: " + options.name + ": requestFileSystem failed with code " + error.code;
             }
         );
+        // monitor connection if the watchconnection option is set
+        var offlineConnections = (Connection ? [Connection.NONE, Connection.UNKNOWN, Connection.CELL_2G] : ["none", "unknown", "2g"]);
+
+        function checkConnection () {
+            if (navigator && navigator.connection) {
+                var index = offlineConnections.indexOf(navigator.connection.type);
+
+                if (index === -1 && myself.isOffline()) {
+                    myself.goOnline();
+                } else if (index !== -1 && myself.isOnline()) {
+                    myself.goOffline();
+                }
+            }
+
+            myself._timeout = setTimeout(checkConnection, 10000);
+        }
+
+        if (myself.options.watchconnection) {
+            myself.getDirHandle(function () {
+                checkConnection();
+            });
+        }
 
         // done, return ourselves because method chaining is cool
         return this;
+    },
+
+    /*
+     * Returns the directory handle once it been initialised
+     */
+
+    getDirHandle: function (callback) {
+        var myself = this;
+
+        function checkHandle() {
+            if (myself.dirhandle) {
+                callback(myself.dirhandle);
+            } else {
+                setTimeout(checkHandle, 500);
+            }
+        }
+
+        checkHandle();
     },
 
     /*
@@ -186,45 +229,52 @@ L.TileLayer.Cordova = L.TileLayer.extend({
     },
 
     downloadAndStoreTile: function (x,y,z,success_callback,error_callback) {
-        var myself    = this;
-        var filename  = myself.dirhandle.toURL() + '/' + [ myself.options.name, z, x, y ].join('-') + '.png';
-        var sourceurl = myself._url_online.replace('{z}',z).replace('{x}',x).replace('{y}',y);
-        if (myself.options.subdomains) {
-            var idx   = Math.floor(Math.random() * myself.options.subdomains.length);
-            var dom   = myself.options.subdomains[idx];
-            sourceurl = sourceurl.replace('{s}',dom);
-        }
-        if (myself.options.debug) console.log("Download " + sourceurl + " => " + filename);
+        var myself = this;
 
-        var transfer = new FileTransfer();
-        transfer.download(
-            sourceurl,
-            filename,
-            function(file) {
-                // tile downloaded OK; set the iOS "don't back up" flag then move on
-                file.setMetadata(null, null, { "com.apple.MobileBackup":1 });
-                if (success_callback) success_callback();
-            },
-            function(error) {
-                var errmsg;
-                switch (error.code) {
-                    case FileTransferError.FILE_NOT_FOUND_ERR:
-                        errmsg = "File not found:\n" + sourceurl;
-                        break;
-                    case FileTransferError.INVALID_URL_ERR:
-                        errmsg = "Invalid URL:\n" + sourceurl;
-                        break;
-                    case FileTransferError.CONNECTION_ERR:
-                        errmsg = "Connection error at the web server.\n";
-                        break;
-                }
-                if (error_callback) error_callback(errmsg);
+        myself.getDirHandle(function () {
+            var filename = myself.dirhandle.toURL() + '/' + [myself.options.name, z, x, y].join('-') + '.png';
+            var sourceurl = myself._url_online.replace('{z}', z).replace('{x}', x).replace('{y}', y);
+            if (myself.options.subdomains) {
+                var idx = Math.floor(Math.random() * myself.options.subdomains.length);
+                var dom = myself.options.subdomains[idx];
+                sourceurl = sourceurl.replace('{s}', dom);
             }
-        );
+            if (myself.options.debug) console.log("Download " + sourceurl + " => " + filename);
+
+            var transfer = new FileTransfer();
+            transfer.download(
+                sourceurl,
+                filename,
+                function (file) {
+                    // tile downloaded OK; set the iOS "don't back up" flag then move on
+                    file.setMetadata(null, null, {"com.apple.MobileBackup": 1});
+                    if (success_callback) success_callback();
+                },
+                function (error) {
+                    var errmsg;
+                    switch (error.code) {
+                        case FileTransferError.FILE_NOT_FOUND_ERR:
+                            errmsg = "File not found:\n" + sourceurl;
+                            break;
+                        case FileTransferError.INVALID_URL_ERR:
+                            errmsg = "Invalid URL:\n" + sourceurl;
+                            break;
+                        case FileTransferError.CONNECTION_ERR:
+                            errmsg = "Connection error at the web server.\n";
+                            break;
+                    }
+                    if (error_callback) error_callback(errmsg);
+                }
+            );
+        });
     },
 
     downloadXYZList: function (xyzlist,overwrite,progress_callback,complete_callback,error_callback) {
         var myself = this;
+
+        myself.getDirHandle(function () {
+            runThisOneByIndex(xyzlist,0,progress_callback,complete_callback,error_callback);
+        });
 
         function runThisOneByIndex(xyzs,index,cbprog,cbdone,cberr) {
             var x = xyzs[index].x;
@@ -282,7 +332,6 @@ L.TileLayer.Cordova = L.TileLayer.extend({
 
             }
         }
-        runThisOneByIndex(xyzlist,0,progress_callback,complete_callback,error_callback);
     },
 
     /*
@@ -292,122 +341,134 @@ L.TileLayer.Cordova = L.TileLayer.extend({
      */
 
     getDiskUsage: function (callback) {
-        var myself    = this;
-        var dirReader = myself.dirhandle.createReader();
+        var myself = this;
 
-        var name_match = new RegExp('^' + myself.options.name + '-');
-        dirReader.readEntries(function (entries) {
-            // a mix of files & directories. In our case we know it's all files and all cached tiles, so just add up the filesize
-            var files = 0;
-            var bytes = 0;
+        myself.getDirHandle(function () {
+            var dirReader = myself.dirhandle.createReader();
+            var name_match = new RegExp('^' + myself.options.name + '-');
 
-            function processFileEntry(index) {
-                if (index >= entries.length) {
-                    if (callback) callback(files,bytes);
-                    return;
+            dirReader.readEntries(function (entries) {
+                // a mix of files & directories. In our case we know it's all files and all cached tiles, so just add up the filesize
+                var files = 0;
+                var bytes = 0;
+
+                function processFileEntry(index) {
+                    if (index >= entries.length) {
+                        if (callback) callback(files, bytes);
+                        return;
+                    }
+
+                    // workaround for smoeone storing multiple layers in one folder, or other files in this folder
+                    // if this file doesn't start with our own name, it's not for this tile layer
+                    if (entries[index].isFile && name_match.exec(entries[index].name)) {
+                        entries[index].file(
+                            function (fileinfo) {
+                                bytes += fileinfo.size;
+                                files++;
+                                processFileEntry(index + 1);
+                            },
+                            function () {
+                                // failed to get file info? impossible, but if it somehow happens just skip on to the next file
+                                processFileEntry(index + 1);
+                            }
+                        );
+                    }
+                    else {
+                        // skip it; next!
+                        processFileEntry(index + 1);
+                    }
                 }
 
-                // workaround for smoeone storing multiple layers in one folder, or other files in this folder
-                // if this file doesn't start with our own name, it's not for this tile layer
-                if (entries[index].isFile && name_match.exec(entries[index].name)) {
-                    entries[index].file(
-                        function (fileinfo) {
-                            bytes += fileinfo.size;
-                            files++;
-                            processFileEntry(index+1);
-                        },
-                        function () {
-                            // failed to get file info? impossible, but if it somehow happens just skip on to the next file
-                            processFileEntry(index+1);
-                        }
-                    );
-                }
-                else {
-                    // skip it; next!
-                    processFileEntry(index+1);
-                }
-            }
-            processFileEntry(0);
-        }, function () {
-            throw "L.TileLayer.Cordova: getDiskUsage: Failed to read directory";
+                processFileEntry(0);
+            }, function () {
+                throw "L.TileLayer.Cordova: getDiskUsage: Failed to read directory";
+            });
         });
     },
 
     emptyCache: function (callback) {
         var myself = this;
-        var dirReader = myself.dirhandle.createReader();
-        var name_match = new RegExp('^' + myself.options.name + '-');
-        dirReader.readEntries(function (entries) {
-            var success = 0;
-            var failed  = 0;
 
-            function processFileEntry(index) {
-                if (index >= entries.length) {
-                    if (callback) callback(success,failed);
-                    return;
+        myself.getDirHandle(function () {
+            var dirReader = myself.dirhandle.createReader();
+            var name_match = new RegExp('^' + myself.options.name + '-');
+
+            dirReader.readEntries(function (entries) {
+                var success = 0;
+                var failed = 0;
+
+                function processFileEntry(index) {
+                    if (index >= entries.length) {
+                        if (callback) callback(success, failed);
+                        return;
+                    }
+
+                    // if this file doesn't start with our own name, it's not for this tile layer
+                    if (entries[index].isFile && name_match.exec(entries[index].name)) {
+                        entries[index].remove(
+                            function () {
+                                success++;
+                                processFileEntry(index + 1);
+                            },
+                            function () {
+                                failed++;
+                                processFileEntry(index + 1);
+                            }
+                        );
+                    }
+                    else {
+                        // skip it; next!
+                        processFileEntry(index + 1);
+                    }
                 }
 
-                // if this file doesn't start with our own name, it's not for this tile layer
-                if (entries[index].isFile && name_match.exec(entries[index].name)) {
-                    entries[index].remove(
-                        function () {
-                            success++;
-                            processFileEntry(index+1);
-                        },
-                        function () {
-                            failed++;
-                            processFileEntry(index+1);
-                        }
-                    );
-                }
-                else {
-                    // skip it; next!
-                    processFileEntry(index+1);
-                }
-            }
-            processFileEntry(0);
-        }, function () {
-            throw "L.TileLayer.Cordova: emptyCache: Failed to read directory";
+                processFileEntry(0);
+            }, function () {
+                throw "L.TileLayer.Cordova: emptyCache: Failed to read directory";
+            });
         });
     },
 
     getCacheContents: function(done_callback) {
         var myself = this;
-        var dirReader = myself.dirhandle.createReader();
-        dirReader.readEntries(function (entries) {
 
-            var retval = [];
-            for (var i = 0; i < entries.length; i++) {
-                var e = entries[i];
-                if (e.isFile) {
+        myself.getDirHandle(function () {
+            var dirReader = myself.dirhandle.createReader();
 
-                    var myEntry = {
-                        name: e.name,
-                        fullPath: e.fullPath,
-                        nativeURL: e.nativeURL
-                    };
+            dirReader.readEntries(function (entries) {
+                var retval = [];
+                for (var i = 0; i < entries.length; i++) {
+                    var e = entries[i];
+                    if (e.isFile) {
 
-                    // Extract the x,y,z pieces from the filename.
-                    var parts_outer = e.name.split(".");
-                    if (parts_outer.length >= 1) {
-                        var parts = parts_outer[0].split('-');
-                        if (parts.length >= 4) {
-                            myEntry['z'] = parts[1];
-                            myEntry['x'] = parts[2];
-                            myEntry['y'] = parts[3];
-                            myEntry['lat'] = myself.getLat(myEntry.y, myEntry.z);
-                            myEntry['lng'] = myself.getLng(myEntry.x, myEntry.z);
+                        var myEntry = {
+                            name: e.name,
+                            fullPath: e.fullPath,
+                            nativeURL: e.nativeURL
+                        };
+
+                        // Extract the x,y,z pieces from the filename.
+                        var parts_outer = e.name.split(".");
+                        if (parts_outer.length >= 1) {
+                            var parts = parts_outer[0].split('-');
+                            if (parts.length >= 4) {
+                                myEntry['z'] = parts[1];
+                                myEntry['x'] = parts[2];
+                                myEntry['y'] = parts[3];
+                                myEntry['lat'] = myself.getLat(myEntry.y, myEntry.z);
+                                myEntry['lng'] = myself.getLng(myEntry.x, myEntry.z);
+                            }
                         }
+
+                        retval.push(myEntry);
                     }
-
-                    retval.push(myEntry);
                 }
-            }
 
-            if (done_callback) done_callback(retval);
+                if (done_callback) done_callback(retval);
 
-        }, function() {
-            throw "L.TileLayer.Cordova: getCacheContents: Failed to read directory";
+            }, function () {
+                throw "L.TileLayer.Cordova: getCacheContents: Failed to read directory";
+            });
         });
     }
 	
